@@ -58,7 +58,6 @@ from hf_gradio.cli import _condense_info, generate_cli_snippet
 from jinja2.exceptions import TemplateNotFound
 from python_multipart.multipart import parse_options_header
 from starlette.background import BackgroundTask
-from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.formparsers import MultiPartException
 from starlette.responses import RedirectResponse
 
@@ -1599,26 +1598,44 @@ class App(FastAPI):
             ):
                 files = []
                 data = {}
-                async with request.form() as form:
-                    for key, value in form.items():
-                        if (
-                            isinstance(value, list)
-                            and len(value) > 1
-                            and isinstance(value[0], StarletteUploadFile)
-                        ):
-                            for i, v in enumerate(value):
-                                if isinstance(v, StarletteUploadFile):
-                                    filename = v.filename
-                                    contents = await v.read()
-                                    files.append((filename, contents))
-                                else:
-                                    data[f"{key}-{i}"] = v
-                        elif isinstance(value, StarletteUploadFile):
-                            filename = value.filename
-                            contents = await value.read()
-                            files.append((filename, contents))
-                        else:
-                            data[key] = value
+                blocks = app.get_blocks()
+                max_file_size = (
+                    blocks.max_file_size
+                    if blocks.max_file_size is not None
+                    else math.inf
+                )
+                multipart_parser = GradioMultiPartParser(
+                    request.headers,
+                    request.stream(),
+                    max_files=1000,
+                    max_fields=1000,
+                    max_file_size=max_file_size,
+                )
+                try:
+                    form = await multipart_parser.parse()
+                except MultiPartException as exc:
+                    code = 413 if "maximum allowed size" in exc.message else 400
+                    raise HTTPException(status_code=code, detail=exc.message) from exc
+
+                for key, value in form.items():
+                    if (
+                        isinstance(value, list)
+                        and len(value) > 1
+                        and isinstance(value[0], GradioUploadFile)
+                    ):
+                        for i, v in enumerate(value):
+                            if isinstance(v, GradioUploadFile):
+                                filename = v.filename
+                                contents = await v.read()
+                                files.append((filename, contents))
+                            else:
+                                data[f"{key}-{i}"] = v
+                    elif isinstance(value, GradioUploadFile):
+                        filename = value.filename
+                        contents = await value.read()
+                        files.append((filename, contents))
+                    else:
+                        data[key] = value
 
                 return ComponentServerBlobBody(
                     data=DataWithFiles(data=data, files=files),
